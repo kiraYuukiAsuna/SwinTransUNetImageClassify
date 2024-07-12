@@ -3,7 +3,7 @@ import torch
 from torch import nn
 
 import SwinTransformer3D
-
+import v3d_io
 
 def get_3D_config():
     config = ml_collections.ConfigDict()
@@ -26,7 +26,7 @@ def get_3D_config():
     config.use_checkpoint = False
     config.out_indices = (0, 1, 2, 3)
     config.pat_merg_rf = 4
-    config.img_size = (128, 128, 128)
+    config.img_size = (128, 128, 64)
     config.reg_head_chan = 16
     return config
 
@@ -106,11 +106,18 @@ class SwinTransformerClassify(nn.Module):
         return x
 
 
-data = torch.rand(1, 1, 128, 128, 128).cuda()
+if __name__ == '__main__':
+    img = v3d_io.load_v3d_raw_img_file("/home/seele/Desktop/resampled.v3draw")
 
-model = SwinTransformerClassify()
-model.cuda()
+    # data = torch.rand(1, 1, 128, 128, 128).cuda()
 
-while True:
-    result = model.forward(data)
-    print(result.cpu())
+    data = torch.from_numpy(img["data"]).cuda()
+    data = data.unsqueeze(0)
+    data = data.permute(0, 4, 1, 2, 3)
+    data = data.float()
+    model = SwinTransformerClassify()
+    model.cuda()
+
+    while True:
+        result = model.forward(data)
+        print(result.cpu())

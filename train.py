@@ -1,102 +1,66 @@
-import glob
 import os
+import sys
+import pandas as pd
+
 import numpy as np
 import torch
-from torchvision import transforms
+from natsort import natsorted
+from torch import nn
+from torch.utils.data import Dataset, DataLoader
+from torchvision.transforms import transforms
+
+import v3d_io
+from main import SwinTransformerClassify
+
+
+class Logger(object):
+    def __init__(self, save_dir):
+        self.terminal = sys.stdout
+        self.log = open(save_dir + "logfile.log", "a")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        pass
+
+
+def adjust_learning_rate(optimizer, epoch, MAX_EPOCHES, INIT_LR, power=0.9):
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = round(INIT_LR * np.power(1 - (epoch) / MAX_EPOCHES, power), 8)
+
+
+class MyDataset(Dataset):
+    def __init__(self, txt_file, root_dir):
+        self.labels_frame = pd.read_csv(txt_file, header=None, names=['image', 'label'], sep=',')
+        self.root_dir = root_dir
+        self.transform = transforms.Compose([
+            transforms.ToTensor(),
+        ])
+
+    def __len__(self):
+        return len(self.labels_frame)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        img_name = os.path.join(self.root_dir, self.labels_frame.iloc[idx, 0])
+        img = v3d_io.load_v3d_raw_img_file(img_name)
+        img_data = img["data"]
+        img_data = torch.from_numpy(img_data).cuda()
+        img_data = img_data.permute(3, 0, 1, 2)
+        img_data = img_data.float()
+
+        label = self.labels_frame.iloc[idx, 1]
+        label = torch.tensor(label).long().cuda()  # assuming that the label is an integer
+
+        return img_data, label
+
+
 def main():
-    test_dir = 'D:/DATA/JHUBrain/Test/'
-    model_idx = -1
-    weights = [1, 0.02]
-    model_folder = 'TransMorph_mse_{}_diffusion_{}/'.format(weights[0], weights[1])
-    model_dir = 'experiments/' + model_folder
-    dict = utils.process_label()
-    if os.path.exists('experiments/'+model_folder[:-1]+'.csv'):
-        os.remove('experiments/'+model_folder[:-1]+'.csv')
-    csv_writter(model_folder[:-1], 'experiments/' + model_folder[:-1])
-    line = ''
-    for i in range(46):
-        line = line + ',' + dict[i]
-    csv_writter(line, 'experiments/' + model_folder[:-1])
-
-    config = CONFIGS_TM['TransMorph']
-    model = TransMorph.TransMorph(config)
-    best_model = torch.load(model_dir + natsorted(os.listdir(model_dir))[model_idx])['state_dict']
-    print('Best model: {}'.format(natsorted(os.listdir(model_dir))[model_idx]))
-    model.load_state_dict(best_model)
-    model.cuda()
-    reg_model = utils.register_model((160, 192, 224), 'nearest')
-    reg_model.cuda()
-    test_composed = transforms.Compose([trans.Seg_norm(),
-                                        trans.NumpyType((np.float32, np.int16)),
-                                        ])
-    test_set = datasets.JHUBrainInferDataset(glob.glob(test_dir + '*.pkl'), transforms=test_composed)
-    test_loader = DataLoader(test_set, batch_size=1, shuffle=False, num_workers=1, pin_memory=True, drop_last=True)
-    eval_dsc_def = utils.AverageMeter()
-    eval_dsc_raw = utils.AverageMeter()
-    eval_det = utils.AverageMeter()
-    with torch.no_grad():
-        stdy_idx = 0
-        for data in test_loader:
-            model.eval()
-            data = [t.cuda() for t in data]
-            x = data[0]
-            y = data[1]
-            x_seg = data[2]
-            y_seg = data[3]
-
-            x_in = torch.cat((x,y),dim=1)
-            x_def, flow = model(x_in)
-            def_out = reg_model([x_seg.cuda().float(), flow.cuda()])
-            tar = y.detach().cpu().numpy()[0, 0, :, :, :]
-            jac_det = utils.jacobian_determinant_vxm(flow.detach().cpu().numpy()[0, :, :, :, :])
-            line = utils.dice_val_substruct(def_out.long(), y_seg.long(), stdy_idx)
-            line = line #+','+str(np.sum(jac_det <= 0)/np.prod(tar.shape))
-            csv_writter(line, 'experiments/' + model_folder[:-1])
-            eval_det.update(np.sum(jac_det <= 0) / np.prod(tar.shape), x.size(0))
-            print('det < 0: {}'.format(np.sum(jac_det <= 0) / np.prod(tar.shape)))
-            dsc_trans = utils.dice_val(def_out.long(), y_seg.long(), 46)
-            dsc_raw = utils.dice_val(x_seg.long(), y_seg.long(), 46)
-            print('Trans dsc: {:.4f}, Raw dsc: {:.4f}'.format(dsc_trans.item(),dsc_raw.item()))
-            eval_dsc_def.update(dsc_trans.item(), x.size(0))
-            eval_dsc_raw.update(dsc_raw.item(), x.size(0))
-            stdy_idx += 1
-
-            # flip moving and fixed images
-            y_in = torch.cat((y, x), dim=1)
-            y_def, flow = model(y_in)
-            def_out = reg_model([y_seg.cuda().float(), flow.cuda()])
-            tar = x.detach().cpu().numpy()[0, 0, :, :, :]
-
-            jac_det = utils.jacobian_determinant_vxm(flow.detach().cpu().numpy()[0, :, :, :, :])
-            line = utils.dice_val_substruct(def_out.long(), x_seg.long(), stdy_idx)
-            line = line #+ ',' + str(np.sum(jac_det < 0) / np.prod(tar.shape))
-            out = def_out.detach().cpu().numpy()[0, 0, :, :, :]
-            print('det < 0: {}'.format(np.sum(jac_det <= 0)/np.prod(tar.shape)))
-            csv_writter(line, 'experiments/' + model_folder[:-1])
-            eval_det.update(np.sum(jac_det <= 0) / np.prod(tar.shape), x.size(0))
-            dsc_trans = utils.dice_val(def_out.long(), x_seg.long(), 46)
-            dsc_raw = utils.dice_val(y_seg.long(), x_seg.long(), 46)
-            print('Trans dsc: {:.4f}, Raw dsc: {:.4f}'.format(dsc_trans.item(), dsc_raw.item()))
-            eval_dsc_def.update(dsc_trans.item(), x.size(0))
-            eval_dsc_raw.update(dsc_raw.item(), x.size(0))
-            stdy_idx += 1
-
-        print('Deformed DSC: {:.3f} +- {:.3f}, Affine DSC: {:.3f} +- {:.3f}'.format(eval_dsc_def.avg,
-                                                                                    eval_dsc_def.std,
-                                                                                    eval_dsc_raw.avg,
-                                                                                    eval_dsc_raw.std))
-        print('deformed det: {}, std: {}'.format(eval_det.avg, eval_det.std))
-
-def csv_writter(line, name):
-    with open(name+'.csv', 'a') as file:
-        file.write(line)
-        file.write('\n')
-
-if __name__ == '__main__':
-    '''
-    GPU configuration
-    '''
-    GPU_iden = 1
+    GPU_iden = 0
     GPU_num = torch.cuda.device_count()
     print('Number of GPU: ' + str(GPU_num))
     for GPU_idx in range(GPU_num):
@@ -106,4 +70,70 @@ if __name__ == '__main__':
     GPU_avai = torch.cuda.is_available()
     print('Currently using: ' + torch.cuda.get_device_name(GPU_iden))
     print('If the GPU is available? ' + str(GPU_avai))
+
+    batch_size = 1
+    lr = 0.0001  # learning rate
+    epoch_start = 0
+    max_epoch = 500  # max traning epoch
+    cont_training = False  # if continue training
+
+    model_dir = "models/"
+
+    logger = Logger("logs/")
+
+    traindataset = MyDataset(txt_file='train.txt', root_dir='Train/')
+    train_loader = DataLoader(traindataset, batch_size=1, shuffle=True)
+
+    valdataset = MyDataset(txt_file='val.txt', root_dir='Val/')
+    val_loader = DataLoader(valdataset, batch_size=1, shuffle=True)
+
+    model = SwinTransformerClassify()
+    model.cuda()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+
+    if cont_training and os.path.exists(model_dir):
+        checkpoints = os.listdir(model_dir)
+        if checkpoints:
+            # 使用natsort进行自然排序，然后选择最后一个checkpoint
+            latest_checkpoint = natsorted(checkpoints)[-1]
+            checkpoint_path = os.path.join(model_dir, latest_checkpoint)
+            checkpoint = torch.load(checkpoint_path)
+            model.load_state_dict(checkpoint['state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            epoch_start = checkpoint['epoch'] + 1
+            print('Model: {} loaded!'.format(latest_checkpoint))
+        else:
+            epoch_start = 0
+    else:
+        epoch_start = 0
+
+    for epoch in range(epoch_start, max_epoch):
+        for data, target in train_loader:
+            model.train()
+            adjust_learning_rate(optimizer, epoch, max_epoch, lr)
+
+            output = model(data)
+            loss = criterion(output, target)
+
+            # compute gradient and do SGD step
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            logger.write('Epoch: {}, Loss: {}\n'.format(epoch, loss.item()))
+
+        # if not os.path.exists(model_dir):
+        #     os.makedirs(model_dir)
+        #
+        # state = {
+        #     'epoch': epoch,
+        #     'state_dict': model.state_dict(),
+        #     'optimizer': optimizer.state_dict()
+        # }
+        # torch.save(state, os.path.join(model_dir, 'checkpoint_epoch_{}.pt'.format(epoch)))
+        # logger.write('Model saved! {}\n'.format(epoch))
+
+
+if __name__ == '__main__':
     main()
